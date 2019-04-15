@@ -1,10 +1,12 @@
 package portrait
 
 import com.hankcs.hanlp.HanLP
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+
 import scala.util.control.Breaks
-import scala.collection.JavaConversions._
 
 /**
   * 作者：blogchong
@@ -13,30 +15,52 @@ import scala.collection.JavaConversions._
   * Desc: 基于movies数据集，计算用户的兴趣元素画像标签
   */
 object moviesPortraitApp {
-  def main(args : Array[String]): Unit = {
+
+  case class UserRatingMovie(userId: String, movieId: String, rate: Double, timestamp: Long)
+  case class UserMovieGenre(userId: String, movie: String, genre: String)
+  case class UserMovieTag(userId: String, movieId: String, tags: String, timestamp: Long)
+
+  def main(args: Array[String]): Unit = {
 
     //设置hive访问host以及端口  hadoop9
-//    val HIVE_METASTORE_URIS = "thrift://139.199.162.36:9083"
+    //    val HIVE_METASTORE_URIS = "thrift://139.199.162.36:9083"
     //注意：实际使用的时候，替换成自己服务器集群中，hive的host以及访问端口
-    val HIVE_METASTORE_URIS = "thrift://hive-host-01:9083,thrift://hive-host-02:9083"
-    System.setProperty("hive.metastore.uris", HIVE_METASTORE_URIS)
+    //    val HIVE_METASTORE_URIS = "thrift://hive-host-01:9083,thrift://hive-host-02:9083"
+    //    System.setProperty("hive.metastore.uris", HIVE_METASTORE_URIS)
+
 
     //构建一个通用的sparkSession
     val sparkSession = SparkSession
       .builder()
       .appName("portrait_m")
-      .enableHiveSupport()
+      .config("spark.master", "local[4]")
+      //      .enableHiveSupport()
       .getOrCreate()
 
-    //DataFrame格式化申明
-    val schemaString = "movieid tag"
-    val schema = StructType(schemaString.split(" ").map(fieldName=>StructField(fieldName,StringType,true)))
+    val sc: SparkContext = sparkSession.sparkContext
+    val ratingsRDD: RDD[Array[String]] = sc.textFile("D:\\Download\\ratings_tmp.dat").map(line => line.split("\t"))/*.sample(false, 0.1, System.currentTimeMillis())*/
+    val tagsRDD: RDD[Array[String]] = sc.textFile("D:\\Download\\tags_tmp.dat").map(line => line.split("\t"))/*.sample(false, 0.1, System.currentTimeMillis())*/
+    val moviesRDD: RDD[Array[String]] = sc.textFile("D:\\Download\\movies_tmp.dat").map(line => line.split("\t"))/*.sample(false, 0.1, System.currentTimeMillis())*/
+    import sparkSession.implicits._
+
+    val ratingsDF = ratingsRDD.map(arr => UserRatingMovie(arr(0), arr(1), arr(2).toDouble, arr(3).toLong)).toDF()
+    ratingsDF.createOrReplaceTempView("mite_ratings")
+    val moviesDF: DataFrame = moviesRDD.map(arr => UserMovieGenre(arr(0), arr(1), arr(2))).toDF()
+    moviesDF.createOrReplaceTempView("mite_movies")
+    val tagsDF: DataFrame = tagsRDD.map(arr => UserMovieTag(arr(0), arr(1), arr(2), arr(3).toLong)).toDF()
+    tagsDF.createOrReplaceTempView("mite_tags")
 
     //获取rating评分数据集
-    val ratingData = sparkSession.sql("select userid,movieid,rate  from mite8.mite_ratings")
+    val ratingData = sparkSession.sql("select userid,movieid,rate  from mite_ratings")
+    ratingData.show(15)
+
+    //获取movies电影数据集
+    val moviesData = sparkSession.sql("select userid,movie,genre  from mite_movies")
+    moviesData.show(15)
 
     //获取电影tags数据
-    val tagsData = sparkSession.sql("select movieid,tag from mite8.mite_tags").rdd
+    val tagsData = sparkSession.sql("select movieid,tags from mite_tags").rdd
+    tagsData.take(15).foreach(println)
 
     System.out.println("=================001 GET DATA===========================")
 
@@ -49,14 +73,14 @@ object moviesPortraitApp {
           f.get(1)
         }else{
           //进行主题词抽取(能屏蔽掉停用词)
-          HanLP.extractKeyword(f.get(1).toString, 20).toSet.mkString(" ")
+          HanLP.extractKeyword(f.get(1).toString, 20).toArray.toSet.mkString(" ")
         }
         (movieid,tag)
     }
 
     System.out.println("=================002 HANLP===========================")
 
-    //进行相似tag合并操作，最终返回依然是(mvieid,tag)集合，但tag会做预处理
+    //进行相似tag合并操作，最终返回依然是(movieid,tag)集合，但tag会做预处理
     val tagsStandardizeTmp = tagsStandardize.collect()
     val tagsSimi = tagsStandardize.map{
       f=>
@@ -86,17 +110,22 @@ object moviesPortraitApp {
           f
         }
     }.map(f=>Row(f._1,f._2.toString.trim))
+    tagsSimi.take(300).foreach(println)
 
     System.out.println("=================003 SIMI===========================")
 
     //先将预处理之后的movie-tag数据进行dataframe
 //    val schemaString = "movieid tag"
 //    val schema = StructType(schemaString.split(" ").map(fieldName=>StructField(fieldName,StringType,true)))
+    //DataFrame格式化申明
+    val schemaString = "movieid tag"
+    val schema = StructType(schemaString.split(" ").map(fieldName => StructField(fieldName, StringType, true)))
     val tagsSimiDataFrame = sparkSession.createDataFrame(tagsSimi,schema)
 
     //对rating(userid,movieid,rate)，tags(movieid,tag)进行join，以movieid关联
     //join步骤：将(userId, movieId, rate)与(movieId, tag)按照movieId字段进行连接
     val tagRateDataFrame = ratingData.join(tagsSimiDataFrame,ratingData("movieid")===tagsSimiDataFrame("movieid"),"inner").select("userid","tag","rate")
+    tagRateDataFrame.show(50)
 
     System.out.println("=================004 JOIN===========================")
 
@@ -107,23 +136,25 @@ object moviesPortraitApp {
 
     //最终数据重新按userid升序,tag的rate的降序排序
     val userTags = tagSumRateDataFrame.orderBy(tagSumRateDataFrame("userid"),tagSumRateDataFrame("sum(rate)").desc)
-
+    userTags.show(300)
     System.out.println("=================006 SORT===========================")
 
-    //将结果存入hive
+    /*//将结果存入hive
     val userTagTmpTableName = "mite_portraittmp"
     val userTagTableName = "mite8.mite_portrait"
 
-    userTags.registerTempTable(userTagTmpTableName)
-    sparkSession.sql("insert into table " + userTagTableName + " select * from " + userTagTmpTableName)
+    userTags.createOrReplaceTempView(userTagTmpTableName)
+    sparkSession.sql("insert into table " + userTagTableName + " select * from " + userTagTmpTableName)*/
 
     System.out.println("=================007 SAVE===========================")
 
+
+    sparkSession.close()
   }
 
   //合并tag，合并原则：长度=1(单个词)；前缀相似度>=2/7，
-  def getEditSize(str1:String,str2:String): Int ={
-    if (str2.size > str1.size){
+  def getEditSize(str1: String, str2: String): Int = {
+    if (str2.size > str1.size) {
       0
     } else {
       //计数器
@@ -132,7 +163,7 @@ object moviesPortraitApp {
       //以较短的str2进行遍历，并逐个比较
       val lengthStr2 = str2.getBytes().length
       var i = 0
-      for ( i <- 1 to lengthStr2 ){
+      for (i <- 1 to lengthStr2) {
         if (str2.getBytes()(i) == str1.getBytes()(i)) {
           //逐个匹配字节，相等则计数器+1
           count += 1
@@ -143,9 +174,9 @@ object moviesPortraitApp {
       }
 
       //计算重叠度,当前缀重叠度大于等于2/7时，进行合并
-      if (count.asInstanceOf[Double]/str1.getBytes().size.asInstanceOf[Double] >= (1-0.286)){
+      if (count.asInstanceOf[Double] / str1.getBytes().size.asInstanceOf[Double] >= (1 - 0.286)) {
         1
-      }else{
+      } else {
         0
       }
     }

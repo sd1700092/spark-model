@@ -97,7 +97,7 @@ val HIVE_METASTORE_URIS = "thrift://hive-host-01:9083,thrift://hive-host-02:9083
 
     System.out.println("=================002.2 TAG SIMI===========================")
 
-    //先将预处理之后的movie-tag数据进行，统计频度，作为tag权重,形成(movie,tagList(tag,score))这种数据集
+    //先将预处理之后的movieId-tag数据进行，统计频度，作为tag权重,形成(movieId,tagList(tag,score))这种数据集
     val movieTagList = tagsSimi.map(f=>((f._1,f._2),1)).reduceByKey(_+_).groupBy(k=>k._1._1).map{
       f=>
         (f._1,f._2.map{
